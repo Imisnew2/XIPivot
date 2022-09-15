@@ -55,10 +55,33 @@ namespace XiPivot
 				HANDLE                hTemplateFile
 				);
 
+			typedef HANDLE(WINAPI* pFnCreateFileW)(
+				LPCWSTR               lpFileName,
+				DWORD                 dwDesiredAccess,
+				DWORD                 dwShareMode,
+				LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+				DWORD                 dwCreationDisposition,
+				DWORD                 dwFlagsAndAttributes,
+				HANDLE                hTemplateFile
+				);
+
 			typedef HANDLE(WINAPI * pFnFindFirstFileA)(
 				LPCSTR             lpFileName,
 				LPWIN32_FIND_DATAA lpFindFileData
 				);
+
+			template<typename T>
+			struct Paths {
+				size_t   (*strlen)(const T*);
+				const T* (*strstr)(const T*, const T*);
+				const T* rom1;
+				const T* rom2;
+				const T* win;
+				const T* win_se;
+				const T* win_se_data;
+				const T* win_music;
+				const T* win_music_data;
+			};
 
 		public:
 			virtual ~Redirector(void);
@@ -119,12 +142,17 @@ namespace XiPivot
 
 			/* static callbacks used by the Detours library */
 			static HANDLE __stdcall dCreateFileA(LPCSTR a0, DWORD a1, DWORD a2, LPSECURITY_ATTRIBUTES a3, DWORD a4, DWORD a5, HANDLE a6);
+			static HANDLE __stdcall dCreateFileW(LPCWSTR a0, DWORD a1, DWORD a2, LPSECURITY_ATTRIBUTES a3, DWORD a4, DWORD a5, HANDLE a6);
 			static HANDLE __stdcall dFindFirstFileA(LPCSTR a0, LPWIN32_FIND_DATAA a2);
 
 		private /* static */:
 
 			static pFnCreateFileA s_procCreateFileA;
+			static pFnCreateFileW s_procCreateFileW;
 			static pFnFindFirstFileA s_procFindFirstFileA;
+
+			static Paths<char>    s_pathsA;
+			static Paths<wchar_t> s_pathsW;
 
 		protected:
 			/* globally unique instance pointer */
@@ -138,9 +166,11 @@ namespace XiPivot
 		private:
 			/* actual code to handle the intercept / redirect of file names */
 			HANDLE __stdcall interceptCreateFileA(LPCSTR a0, DWORD a1, DWORD a2, LPSECURITY_ATTRIBUTES a3, DWORD a4, DWORD a5, HANDLE a6);
+			HANDLE __stdcall interceptCreateFileW(LPCWSTR a0, DWORD a1, DWORD a2, LPSECURITY_ATTRIBUTES a3, DWORD a4, DWORD a5, HANDLE a6);
 			HANDLE __stdcall interceptFindFirstFileA(LPCSTR a0, LPWIN32_FIND_DATAA a2);
 
-			const char *findRedirect(const char *realPath, int32_t &outPathKey);
+			template<typename T>
+			const char* findRedirect(const Paths<T>& paths, const T* realPath, int32_t& outPathKey);
 
 			/* first-time scan of overlay directories - basically "find all dat paths and record them" */
 			bool scanOverlayPath(const std::string &overlayPath);
@@ -152,9 +182,11 @@ namespace XiPivot
 			bool collectDataFiles(const std::string &parentPath, const std::string &midPath, const std::string &pattern, std::vector<std::string> &result);
 
 			/* an actual 32bit integer perfect hash for XI ROM paths >:3 */
-			int32_t pathToIndex(const char *romPath);
+			template<typename T>
+			int32_t pathToIndex(const T *romPath);
 			/* and the same for sound / music files */
-			int32_t pathToIndexAudio(const char *soundPath);
+			template<typename T>
+			int32_t pathToIndexAudio(const Paths<T> &paths, const T *soundPath);
 
 
 			bool                                     m_hooksSet;

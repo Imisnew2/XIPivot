@@ -30,6 +30,8 @@
 #include "MemCache.h"
 #include "detours.h"
 
+#include "atlstr.h"
+
 #include <cctype>
 #include <algorithm>
 
@@ -42,7 +44,31 @@ namespace XiPivot
 		Redirector* Redirector::s_instance = nullptr;
 
 		Redirector::pFnCreateFileA    Redirector::s_procCreateFileA = CreateFileA;
+		Redirector::pFnCreateFileW    Redirector::s_procCreateFileW = CreateFileW;
 		Redirector::pFnFindFirstFileA Redirector::s_procFindFirstFileA = FindFirstFileA;
+
+		Redirector::Paths<char> Redirector::s_pathsA = {
+			/* strlen         = */ strlen,
+			/* strstr         = */ strstr,
+			/* rom1           = */ "//ROM",
+			/* rom2           = */ "\\ROM",
+			/* win            = */ "\\win\\",
+			/* win_se         = */ "\\win\\se\\",
+			/* win_se_data    = */ "\\win\\se\\data",
+			/* win_music      = */ "\\win\\music\\",
+			/* win_music_data = */ "\\win\\music\\data",
+		};
+		Redirector::Paths<wchar_t> Redirector::s_pathsW = {
+			/* strlen         = */ wcslen,
+			/* strstr         = */ wcsstr,
+			/* rom1           = */ L"//ROM",
+			/* rom2           = */ L"\\ROM",
+			/* win            = */ L"\\win\\",
+			/* win_se         = */ L"\\win\\se\\",
+			/* win_se_data    = */ L"\\win\\se\\data",
+			/* win_music      = */ L"\\win\\music\\",
+			/* win_music_data = */ L"\\win\\music\\data",
+		};
 
 		/* static interface */
 		Redirector& Redirector::instance(void)
@@ -61,9 +87,23 @@ namespace XiPivot
 			 */
 			if (Redirector::s_instance != nullptr)
 			{
+				Redirector::s_instance->m_logger->logMessageF(Redirector::s_instance->m_logDebug, "CreateFileA");
 				return Redirector::s_instance->interceptCreateFileA(a0, a1, a2, a3, a4, a5, a6);
 			}
 			return Redirector::s_procCreateFileA(a0, a1, a2, a3, a4, a5, a6);
+		}
+
+		HANDLE __stdcall Redirector::dCreateFileW(LPCWSTR a0, DWORD a1, DWORD a2, LPSECURITY_ATTRIBUTES a3, DWORD a4, DWORD a5, HANDLE a6)
+		{
+			/* don't use the Singleton access here;
+			 * if for whatever reason the global object is gone we don't want a new one
+			 */
+			if (Redirector::s_instance != nullptr)
+			{
+				Redirector::s_instance->m_logger->logMessageF(Redirector::s_instance->m_logDebug, "CreateFileW");
+				return Redirector::s_instance->interceptCreateFileW(a0, a1, a2, a3, a4, a5, a6);
+			}
+			return Redirector::s_procCreateFileW(a0, a1, a2, a3, a4, a5, a6);
 		}
 
 		HANDLE __stdcall Redirector::dFindFirstFileA(LPCSTR a0, LPWIN32_FIND_DATAA a1)
@@ -73,6 +113,7 @@ namespace XiPivot
 			 */
 			if (Redirector::s_instance != nullptr)
 			{
+				Redirector::s_instance->m_logger->logMessageF(Redirector::s_instance->m_logDebug, "FindFirstFileA");
 				return Redirector::s_instance->interceptFindFirstFileA(a0, a1);
 			}
 			return Redirector::s_procFindFirstFileA(a0, a1);
@@ -116,6 +157,7 @@ namespace XiPivot
 				DetourUpdateThread(GetCurrentThread());
 
 				DetourAttach(&(PVOID&)Redirector::s_procCreateFileA, Redirector::dCreateFileA);
+				DetourAttach(&(PVOID&)Redirector::s_procCreateFileW, Redirector::dCreateFileW);
 				DetourAttach(&(PVOID&)Redirector::s_procFindFirstFileA, Redirector::dFindFirstFileA);
 
 				m_hooksSet = DetourTransactionCommit() == NO_ERROR;
@@ -136,6 +178,7 @@ namespace XiPivot
 				DetourUpdateThread(GetCurrentThread());
 
 				DetourDetach(&(PVOID&)Redirector::s_procCreateFileA, Redirector::dCreateFileA);
+				DetourDetach(&(PVOID&)Redirector::s_procCreateFileW, Redirector::dCreateFileW);
 				DetourDetach(&(PVOID&)Redirector::s_procFindFirstFileA, Redirector::dFindFirstFileA);
 
 				m_hooksSet = (DetourTransactionCommit() == NO_ERROR) ? false : true;
@@ -209,8 +252,26 @@ namespace XiPivot
 			m_logger->logMessageF(m_logDebug, "lpFileName = '%s'", static_cast<const char*>(a0));
 
 			int32_t pathKey = -1;
-			const char* path = findRedirect(a0, pathKey);
-			return MemCache::instance().trackCacheObject(Redirector::s_procCreateFileA((LPCSTR)path, a1, a2, a3, a4, a5, a6), pathKey);
+			if (const char *path = findRedirect(s_pathsA, a0, pathKey)) {
+				return MemCache::instance().trackCacheObject(Redirector::s_procCreateFileA((LPCSTR)path, a1, a2, a3, a4, a5, a6), pathKey);
+			}
+			return MemCache::instance().trackCacheObject(Redirector::s_procCreateFileA(a0, a1, a2, a3, a4, a5, a6), pathKey);
+		}
+
+		HANDLE __stdcall
+			Redirector::interceptCreateFileW(LPCWSTR a0, DWORD a1, DWORD a2, LPSECURITY_ATTRIBUTES a3, DWORD a4, DWORD a5, HANDLE a6)
+		{
+			m_logger->logMessageF(m_logDebug, "lpFileName = '%ls'", static_cast<const wchar_t*>(a0));
+
+			int32_t pathKey = -1;
+			if (const char *path = findRedirect(s_pathsW, a0, pathKey)) {
+				/* Note: We cannot call 'CreateFileA' instead of 'CreateFileW' in this hook.
+				 * Otherwise, the caller seemingly enters an infinite loop and we crash. So,
+				 * this conversion into a wide-path is unavoidable. */
+				CA2W wide_path(path);
+				return MemCache::instance().trackCacheObject(Redirector::s_procCreateFileW(wide_path, a1, a2, a3, a4, a5, a6), pathKey);
+			}
+			return MemCache::instance().trackCacheObject(Redirector::s_procCreateFileW(a0, a1, a2, a3, a4, a5, a6), pathKey);
 		}
 
 		HANDLE __stdcall
@@ -219,19 +280,37 @@ namespace XiPivot
 			m_logger->logMessageF(m_logDebug, "lpFileName = '%s'", static_cast<const char*>(a0));
 
 			int32_t _unusedPathKey = -1;
-			const char* path = findRedirect(a0, _unusedPathKey);
-			return Redirector::s_procFindFirstFileA((LPCSTR)path, a1);
+			if (const char *path = findRedirect(s_pathsA, a0, _unusedPathKey)) {
+				return Redirector::s_procFindFirstFileA((LPCSTR)path, a1);
+			}
+			return Redirector::s_procFindFirstFileA(a0, a1);
 		}
 
 		/* private stuff */
-		const char *Redirector::findRedirect(const char *realPath, int32_t &outPathKey)
+		template<typename T>
+		const char *Redirector::findRedirect(const Paths<T> &p, const T* realPath, int32_t& outPathKey)
 		{
-			const char *romPath = strstr(realPath, "//ROM");
-			const char *sfxPath;
+			const T *romPath;
+			const T *sfxPath;
 
-			if (strstr(realPath, "\\win\\se\\") != nullptr || strstr(realPath, "\\win\\music\\") != nullptr)
+			if (const T *rom = p.strstr(realPath, p.rom1))
 			{
-				sfxPath = &(strstr(realPath, "\\win\\")[-1]);
+				/* Found '//ROM'; increment past it. */
+				romPath = rom + p.strlen(p.rom1);
+			}
+			else if (const T *rom = p.strstr(realPath, p.rom2))
+			{
+				/* Found '\ROM'; increment past it. */
+				romPath = rom + p.strlen(p.rom2);
+			}
+			else
+			{
+				romPath = nullptr;
+			}
+
+			if (p.strstr(realPath, p.win_se) != nullptr || p.strstr(realPath, p.win_music) != nullptr)
+			{
+				sfxPath = &(p.strstr(realPath, p.win)[-1]);
 			}
 			else
 			{
@@ -254,7 +333,7 @@ namespace XiPivot
 			}
 			if (sfxPath != nullptr)
 			{
-				int32_t sfxIndex = pathToIndexAudio(sfxPath);
+				int32_t sfxIndex = pathToIndexAudio(p, sfxPath);
 				const auto res = m_resolvedPaths.find(sfxIndex);
 			
 				// disabled for music until I have time to look into why it creates audio garbage.
@@ -265,7 +344,8 @@ namespace XiPivot
 					return (*res).second.c_str();
 				}
 			}
-			return realPath;
+
+			return nullptr;
 		}
 
 		bool Redirector::scanOverlayPath(const std::string &basePath)
@@ -293,7 +373,8 @@ namespace XiPivot
 								continue;
 							}
 
-							int32_t romIndex = pathToIndex(strstr(table.c_str(), "//ROM"));
+							const char* romPath = strstr(table.c_str(), "//ROM") + 5;
+							int32_t romIndex = pathToIndex(romPath);
 							if (romIndex != -1)
 							{
 								if (m_resolvedPaths.find(romIndex) == m_resolvedPaths.end())
@@ -320,7 +401,8 @@ namespace XiPivot
 							{
 								for (const auto &dat : datFiles)
 								{
-									int32_t romIndex = pathToIndex(strstr(dat.c_str(), "//ROM"));
+									const char* romPath = strstr(dat.c_str(), "//ROM") + 5;
+									int32_t romIndex = pathToIndex(romPath);
 									if (romIndex == -1)
 									{
 										m_logger->logMessageF(ILogProvider::LogLevel::Info, "Ignoring '%s' - invalid filename", dat.c_str());
@@ -361,7 +443,7 @@ namespace XiPivot
 								for (auto &sfx : sfxFiles)
 								{
 									std::transform(sfx.begin(), sfx.end(), sfx.begin(), [](unsigned char c) { return std::tolower(c); });
-									int32_t sfxIndex = pathToIndexAudio(&strstr(sfx.c_str(), "/win/se/")[-1]);
+									int32_t sfxIndex = pathToIndexAudio(s_pathsA, &strstr(sfx.c_str(), "/win/se/")[-1]);
 									if (sfxIndex == -1)
 									{
 										m_logger->logMessageF(ILogProvider::LogLevel::Info, "Ignoring '%s' - invalid filename", sfx.c_str());
@@ -384,7 +466,7 @@ namespace XiPivot
 						for (auto &bgw : bgwFiles)
 						{
 							std::transform(bgw.begin(), bgw.end(), bgw.begin(), [](unsigned char c) { return std::tolower(c); });
-							int32_t bgwIndex = pathToIndexAudio(&strstr(bgw.c_str(), "/win/music/")[-1]);
+							int32_t bgwIndex = pathToIndexAudio(s_pathsA, &strstr(bgw.c_str(), "/win/music/")[-1]);
 							if (bgwIndex == -1)
 							{
 								m_logger->logMessageF(ILogProvider::LogLevel::Info, "Ignoring '%s' - invalid filename", bgw.c_str());
@@ -479,10 +561,11 @@ namespace XiPivot
 			return results.size() != 0;
 		}
 
-		int32_t Redirector::pathToIndex(const char *romPath)
+		template<typename T>
+		int32_t Redirector::pathToIndex(const T *romPath)
 		{
 			/* **very** tailored approach to get a fast,
-			 * unique index for every given //ROM* path
+			 * unique index for every ROM path.
 			 *
 			 * it's build on the current ROM layout and
 			 * **will break** if SE ever decides to add
@@ -497,26 +580,20 @@ namespace XiPivot
 			 *
 			 * See the following paths and their resulting index:
 			 *
-			 * //ROM/0/0.DAT        =>         0
-			 * //ROM/0/1.DAT        =>         1
-			 * //ROM1/2/3.DAT       =>   1002003
-			 * //ROM1/22/33.DAT     =>   1022033
-			 * //ROM1/222/333.DAT   =>   1222333
-			 * //ROM9/999/999.DAT   =>   9999999
-			 * //ROM10/999/999.DAT  => 109999999
-			 * //ROM10/VTABLE.DAT   => 140000010
-			 * //ROM10/FTABLE.DAT   => 150000010
+			 * [//ROM] /0/0.DAT        =>         0
+			 * [//ROM] /0/1.DAT        =>         1
+			 * [//ROM] 1/2/3.DAT       =>   1002003
+			 * [//ROM] 1/22/33.DAT     =>   1022033
+			 * [//ROM] 1/222/333.DAT   =>   1222333
+			 * [//ROM] 9/999/999.DAT   =>   9999999
+			 * [//ROM] 10/999/999.DAT  => 109999999
+			 * [//ROM] 10/VTABLE.DAT   => 140000010
+			 * [//ROM] 10/FTABLE.DAT   => 150000010
 			 * - anything invalid - =>        -1
 			 */
 			int32_t romIndex = 0;
 
-			/* start at the first character after "//ROM"
-			 * this is either a digit or '/' in case of the base "//ROM/"
-			 * There is no specific check for paths shorter than 6
-			 * characters, but then again, this method is not called on
-			 * random strings either.
-			 */
-			char *p = (char*)&romPath[5];
+			T *p = (T*)romPath;
 			while (p && *p != '.' && *p != 0)
 			{
 				int subIndex = 0;
@@ -527,7 +604,7 @@ namespace XiPivot
 					subIndex += (*p) - '0';
 				}
 
-				if (*p == '/')
+				if (*p == '/' || *p == '\\')
 				{
 					/* skip the '/' and shift the ROM base left */
 					romIndex *= 1000;
@@ -562,7 +639,8 @@ namespace XiPivot
 			return romIndex;
 		}
 
-		int32_t Redirector::pathToIndexAudio(const char *soundPath)
+		template<typename T>
+		int32_t Redirector::pathToIndexAudio(const Paths<T>& paths, const T *soundPath)
 		{
 			int32_t soundIndex = 0;
 
@@ -572,9 +650,9 @@ namespace XiPivot
 			 * characters, but then again, this method is not called on
 			 * random strings either.
 			 */
-			char *p = (char*)soundPath;
+			T *p = (T*)soundPath;
 
-			if (strstr(soundPath, "/win/music/data") == 0 && strstr(soundPath, "\\win\\music\\data") == 0)
+			if (paths.strstr(soundPath, paths.win_music_data) == 0)
 			{
 				/* sound subdir */
 				soundIndex = 20000000;
